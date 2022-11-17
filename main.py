@@ -7,11 +7,13 @@ import json
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 import torchvision
+from torchvision.models import ResNet50_Weights
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.transforms import functional as F
 
@@ -25,25 +27,43 @@ import train
 from utils import collate_fn
 from engine import train_one_epoch, evaluate
 
-import annotations_parser
-
 BASE_PATH = 'datasets'
 IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images'])
+ANNOTS_PATH = os.path.sep.join([BASE_PATH, 'annotations'])
+TRAIN_PATH = os.path.sep.join([IMAGES_PATH, 'train'])
+TEST_PATH = os.path.sep.join([IMAGES_PATH, 'test'])
+PROCESSED_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_processed.json'])
+
+MODEL_PATH = 'models'
+
 keypoints_classes_ids2names = {0: 'dorsal_distal_radius', 1: 'volar_distal_radius', 2: 'dorsal_distal_shaft', 3: 'dorsal_middle_shaft', 4: 'dorsal_proximal_shaft', 5: 'volar_distal_shaft', 6: 'volar_middle_shaft', 7: 'volar_proximal_shaft'}
+
+NUM_KEYPOINTS = 8
 
 
 def train_transform():
     return A.Compose([
         A.Sequential([
-            A.Rotate(limit=45, p=0.9),
-            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3,
-                                       brightness_by_max=True, always_apply=False, p=1),
-            # Random change of brightness & contrast
+            # A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=0.8),
+            A.HorizontalFlip(p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, brightness_by_max=True, always_apply=False, p=1),
+            #  A.Blur(blur_limit=3, p=0.5),
         ], p=1)],
         keypoint_params=A.KeypointParams(format='xy'),
         bbox_params=A.BboxParams(format='pascal_voc', label_fields=['bboxes_labels'])
         # Bboxes should have labels
     )
+
+
+def get_processed_annots(processed_annot_path=PROCESSED_ANNOT_PATH):
+    with open(processed_annot_path, 'r') as openfile:
+        annots = json.load(openfile)
+    return annots
+
+
+"""
+Implementation of Dataset adapted for custom distal radius data
+"""
 
 
 class DistalRadiusDataset(Dataset):
@@ -52,14 +72,13 @@ class DistalRadiusDataset(Dataset):
         self.transform = transform
         self.demo = demo
         # Use demo=True if you need transformed and original images
-        self.imgs_files = sorted(glob.glob(os.path.join(root, "images") + '/*.png'))  # .png files only
-        self.annotations_files = sorted(glob.glob(os.path.join(root, "annotations") + '/*.json'))
-        self.data = annotations_parser.convert_coco_annots()
+        self.imgs_files = sorted(glob.glob(root + '/*.png'))  # .png files only
+        self.annots = get_processed_annots()
 
     def __getitem__(self, idx):
-        img_path = self.data[idx]['path']
-        data = self.data[idx]
-        img_original = cv2.imread(img_path[1:])
+        img_path = self.imgs_files[idx]
+        data = next((item for item in self.annots if item["file_name"] == os.path.basename(img_path)), None)
+        img_original = cv2.imread(img_path)
         img_original = cv2.cvtColor(img_original, cv2.COLOR_BGR2RGB)
         # with open(annotations_path) as f:
         #     data = json.load(f)
@@ -96,12 +115,12 @@ class DistalRadiusDataset(Dataset):
             # Then we need to convert it to the following list:
             # [[obj1_kp1, obj1_kp2], [obj2_kp1, obj2_kp2],
             #   [obj3_kp1, obj3_kp2]]
-            keypoints_transformed_unflattened = np.reshape(np.array
-                                                           (transformed['keypoints']),
-                                                           (-1, 2, 2)).tolist()
+            # print(keypoints_original)
+            # print(np.array(transformed['keypoints']))
+            keypoints_transformed_unflattened = np.reshape(np.array(transformed['keypoints']),
+                                                           (-1, NUM_KEYPOINTS, 2)).tolist()
             # Converting transformed keypoints from [x, y]-format to [x,y,visibility]-format by appending original visibilities to transformed coordinates of keypoints
             keypoints = []
-            print(keypoints_transformed_unflattened)
 
             for o_idx, obj in enumerate(keypoints_transformed_unflattened):  # Iterating over objects
                 obj_keypoints = []
@@ -111,9 +130,7 @@ class DistalRadiusDataset(Dataset):
                     # keypoints_original[o_idx][k_idx][2] - original visibility of keypoint
                     kp.append(1)
                     obj_keypoints.append(kp)
-                    # print([keypoints_original[o_idx][k_idx][2]])
                 keypoints.append(obj_keypoints)
-                print(obj_keypoints)
 
         else:
             img, bboxes, keypoints = img_original, bboxes_original, keypoints_original
@@ -149,6 +166,11 @@ class DistalRadiusDataset(Dataset):
         return len(self.imgs_files)
 
 
+"""
+Visualize method adapted from https://medium.com/@alexppppp/how-to-train-a-custom-keypoint-detection-model-with-pytorch-d9af90e111da
+"""
+
+
 def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=None, keypoints_original=None):
     fontsize = 18
 
@@ -174,33 +196,156 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
 
         for kps in keypoints_original:
             for idx, kp in enumerate(kps):
-                image_original = cv2.circle(image_original, tuple(kp), 5, (255, 0, 0), 10)
-                image_original = cv2.putText(image_original, " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 0), 3, cv2.LINE_AA)
+                image_original = cv2.circle(image_original, tuple(kp), 0, (255, 0, 0), 5)
+                image_original = cv2.putText(image_original, " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 0, cv2.LINE_AA)
 
-        f, ax = plt.subplots(1, 2, figsize=(40, 20))
+        f, ax = plt.subplots(1, 2, figsize=(10, 5))
 
         ax[0].imshow(image_original)
         ax[0].set_title('Original image', fontsize=fontsize)
 
         ax[1].imshow(image)
         ax[1].set_title('Transformed image', fontsize=fontsize)
+        plt.show()
 
 
-def main():
-    os.chdir(sys.path[0])
-    dataset = DistalRadiusDataset(root=BASE_PATH, transform=train_transform(), demo=True)
-    myiter = iter(dataset)
-    img, target, img_original, target_original = next(myiter)
-    print()
-    # plt.imshow(img_original.permute(1, 2, 0))
-    # plt.show()
+"""
+Permute image to displayable format and extrace bboxes and keypoints from output
+"""
 
+
+def get_images_bboxes_and_keypoints(img, target):
     image = (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     bboxes = target['boxes'].detach().cpu().numpy().astype(np.int32).tolist()
     keypoints = []
     for kps in target['keypoints'].detach().cpu().numpy().astype(np.int32).tolist():
         keypoints.append([kp[:2] for kp in kps])
-    visualize(image, bboxes, keypoints)
+    return image, bboxes, keypoints
+
+
+"""
+Create model from torchvision model zoo
+"""
+
+
+def get_model(num_keypoints=NUM_KEYPOINTS, weights_path=None):
+    anchor_generator = AnchorGenerator(sizes=(32, 64, 128, 256, 512), aspect_ratios=(0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0))
+    model = torchvision.models.detection.keypointrcnn_resnet50_fpn(weights=None,
+                                                                   weights_backbone=ResNet50_Weights.DEFAULT,
+                                                                   num_keypoints=num_keypoints,
+                                                                   num_classes=2,  # Background is the first class, object is the second class
+                                                                   rpn_anchor_generator=anchor_generator)
+    if weights_path:
+        state_dict = torch.load(weights_path)
+        model.load_state_dict(state_dict)
+    return model
+
+
+"""
+Train model
+"""
+
+
+def train_model(data_loader_train, data_loader_test, model=None, num_epochs=5, save=None):
+    if model is None:
+        model = get_model()
+        # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+    device = torch.device('cpu')
+    model.to(device)
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.3)
+
+    for epoch in range(num_epochs):
+        train_one_epoch(model, optimizer, data_loader_train, device, epoch, print_freq=1000)
+        lr_scheduler.step()
+        evaluate(model, data_loader_test, device)
+
+    # Save model weights after training
+    date_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+    if save:
+        torch.save(model.state_dict(), os.path.sep.join([MODEL_PATH, f'{save}_{date_time}.pth']))
+
+
+"""
+Run predict and display results
+"""
+
+
+def predict(data_loader, model, device=None, display_preds=True):
+    if device is None:
+        # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+        device = torch.device('cpu')
+    model.to(device)
+
+    iterator = iter(data_loader)
+    images, targets = next(iterator)
+    images = list(image.to(device) for image in images)
+
+    with torch.no_grad():
+        model.to(device)
+        model.eval()
+        output = model(images)
+
+    print("Predictions: \n", output[0])
+
+    image = (images[0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(np.uint8)
+    scores = output[0]['scores'].detach().cpu().numpy()
+
+    high_scores_idxs = np.where(scores > 0.3)[0].tolist()  # Indexes of boxes with scores > 0.7
+    post_nms_idxs = torchvision.ops.nms(output[0]['boxes'][high_scores_idxs], output[0]['scores'][high_scores_idxs], 0.3).cpu().numpy()  # Indexes of boxes left after applying NMS (iou_threshold=0.3)
+
+    # Below, in output[0]['keypoints'][high_scores_idxs][post_nms_idxs] and output[0]['boxes'][high_scores_idxs][post_nms_idxs]
+    # Firstly, we choose only those objects, which have score above predefined threshold. This is done with choosing elements with [high_scores_idxs] indexes
+    # Secondly, we choose only those objects, which are left after NMS is applied. This is done with choosing elements with [post_nms_idxs] indexes
+
+    keypoints = []
+    for kps in output[0]['keypoints'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
+        keypoints.append([list(map(int, kp[:2])) for kp in kps])
+
+    bboxes = []
+    for bbox in output[0]['boxes'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
+        bboxes.append(list(map(int, bbox.tolist())))
+
+    if display_preds:
+        img, original_bboxes, original_keypoints = get_images_bboxes_and_keypoints(images[0], targets[0])
+        visualize(image, bboxes, keypoints, img, original_bboxes, original_keypoints)
+
+
+"""
+Main function
+"""
+
+
+def main():
+    os.chdir(sys.path[0])
+    os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+    train_dataset = DistalRadiusDataset(root=TRAIN_PATH, transform=train_transform(), demo=False)
+    test_dataset = DistalRadiusDataset(root=TEST_PATH, transform=None, demo=False)
+    data_loader_train = DataLoader(train_dataset, batch_size=3, shuffle=True, collate_fn=collate_fn)
+    data_loader_test = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+
+    # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+    device = torch.device('cpu')
+
+    # model = get_model()
+    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'keypointsrcnn_e10_2022_11_17_133052.pth']))
+    model.to(device)
+    # train_model(data_loader_train, data_loader_test, model, num_epochs=10, save='keypointsrcnn_e10')
+    # evaluate(model, data_loader_test, device)
+
+    predict(data_loader_test, model, device)
+
+    # train_iter = iter(train_dataset)
+    # img, target, img_original, target_original = next(train_iter)
+
+    # image, bboxes, keypoints = get_images_bboxes_and_keypoints(img, target)
+    # image_original, bboxes_original, keypoints_original = get_images_bboxes_and_keypoints(img_original, target_original)
+    # visualize(image, bboxes, keypoints, image_original, bboxes_original, keypoints_original)
+    # batch = next(myiter)
+    # print(len(batch))
+    # print(batch)
 
 
 main()

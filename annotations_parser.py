@@ -1,12 +1,14 @@
 import sys
 import os
+import json
 from pycocotools.coco import COCO
 
 
-ANNOTATIONS_FILE = 'datasets/annotations/distalradius.json'
+RAW_ANNOT_PATH = 'datasets/annotations/distalradius.json'
+PROCESSED_ANNOT_PATH = 'datasets/annotations/distalradius_processed.json'
 
 
-def convert_coco_annots(annotations_file=ANNOTATIONS_FILE):
+def convert_coco_annots(annotations_file=RAW_ANNOT_PATH):
     coco_annotation = COCO(annotations_file)
 
     # Category IDs.
@@ -91,14 +93,17 @@ def convert_coco_annots(annotations_file=ANNOTATIONS_FILE):
                     converted_keypoints.append([a['keypoints'][j], a['keypoints'][j + 1], 1])
                 converted_datum['keypoints'].append(converted_keypoints)
         converted_data.append(converted_datum)
-        # print(converted_datum)
     return(converted_data)
 
 
-def main(annotations_file=ANNOTATIONS_FILE):
+def main(annotations_file=RAW_ANNOT_PATH):
     # change current working directory to this file's folder
     os.chdir(sys.path[0])
-    print(convert_coco_annots(annotations_file))
+    processed_annots = convert_coco_annots(annotations_file)
+    # with open(PROCESSED_ANNOT_PATH, "w") as outfile:
+    # json.dump(processed_annots, outfile)
+    for a in processed_annots:
+        print(a)
 
 
 main()
