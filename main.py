@@ -7,6 +7,8 @@ import json
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import io
+from contextlib import redirect_stdout
 from datetime import datetime
 
 import torch
@@ -19,22 +21,20 @@ from torchvision.transforms import functional as F
 
 import albumentations as A
 
-import transforms
-import utils
-import engine
-import train
-
 from utils import collate_fn
 from engine import train_one_epoch, evaluate
 
 BASE_PATH = 'datasets'
 IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images'])
+# IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images', 'smallscale']) uncomment to use n = 5
 ANNOTS_PATH = os.path.sep.join([BASE_PATH, 'annotations'])
 TRAIN_PATH = os.path.sep.join([IMAGES_PATH, 'train'])
 TEST_PATH = os.path.sep.join([IMAGES_PATH, 'test'])
 PROCESSED_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_processed.json'])
 
 MODEL_PATH = 'models'
+FIGURE_PATH = 'figures'
+LOG_PATH = 'logs'
 
 keypoints_classes_ids2names = {0: 'dorsal_distal_radius', 1: 'volar_distal_radius', 2: 'dorsal_distal_shaft', 3: 'dorsal_middle_shaft', 4: 'dorsal_proximal_shaft', 5: 'volar_distal_shaft', 6: 'volar_middle_shaft', 7: 'volar_proximal_shaft'}
 
@@ -202,10 +202,10 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
         f, ax = plt.subplots(1, 2, figsize=(10, 5))
 
         ax[0].imshow(image_original)
-        ax[0].set_title('Original image', fontsize=fontsize)
+        ax[0].set_title('Ground Truth', fontsize=fontsize)
 
         ax[1].imshow(image)
-        ax[1].set_title('Transformed image', fontsize=fontsize)
+        ax[1].set_title('Prediction', fontsize=fontsize)
         plt.show()
 
 
@@ -246,7 +246,7 @@ Train model
 """
 
 
-def train_model(data_loader_train, data_loader_test, model=None, num_epochs=5, save=None):
+def train_model(data_loader_train, data_loader_test, model=None, num_epochs=5, save=None, log=""):
     if model is None:
         model = get_model()
         # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
@@ -255,17 +255,97 @@ def train_model(data_loader_train, data_loader_test, model=None, num_epochs=5, s
 
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
+    # optimizer = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.3)
 
+    train_losses = []
+    train_kp_losses = []
+    val_aps = []
+
     for epoch in range(num_epochs):
-        train_one_epoch(model, optimizer, data_loader_train, device, epoch, print_freq=1000)
-        lr_scheduler.step()
-        evaluate(model, data_loader_test, device)
+        date_time = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        log += f'{date_time}\tEpoch: {epoch}\n'  # log time of each epoch start
+
+        metrics = train_one_epoch(model, optimizer, data_loader_train, device, epoch, print_freq=1000)
+
+        date_time = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        log += f'{date_time}\t{str(metrics)}\n'  # log training metrics
+
+        train_losses.append(metrics.loss.global_avg)
+        train_kp_losses.append(metrics.loss_keypoint.global_avg)
+        lr_scheduler.step
+
+        temp_log = io.StringIO()  # metrics not returnable; capture print statemets to obtain formatted results
+        with redirect_stdout(temp_log):
+            eval_results = evaluate(model, data_loader_test, device)
+        temp_log = temp_log.getvalue()
+        print(temp_log)
+        val_aps.append(eval_results.coco_eval['keypoints'].stats[0])  # AP @ IoU=0.50:0.95
+
+        date_time = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+        try:
+            temp_log = temp_log[temp_log.index('IoU'):]
+            log += f'{date_time}\tCOCO evaluator results:\n{temp_log}\n'
+        except ValueError:
+            log += 'COCO evaluator results missing \'IoU\''
+        log += '\n'
+
+    # print(f'Training losses:{train_losses}')
+    # print(f'Keypoint losses:{train_kp_losses}')
+    # print(f'Validation Average Precision @ IoU = 0.50:0.95:{val_aps}')
 
     # Save model weights after training
     date_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
     if save:
         torch.save(model.state_dict(), os.path.sep.join([MODEL_PATH, f'{save}_{date_time}.pth']))
+
+    train_metrics = {'train_losses': train_losses, 'train_kp_losses': train_kp_losses, 'val_aps': val_aps}
+    return train_metrics, log
+
+
+"""
+Display graph of training metrics
+"""
+
+
+def plot_metrics(train_metrics, save_fig_name=None):
+    train_losses = train_metrics['train_losses']
+    train_kp_losses = train_metrics['train_kp_losses']
+    val_aps = train_metrics['val_aps']
+    num_epochs = len(train_losses)
+    params = {"ytick.color": "black",
+              "xtick.color": "black",
+              "axes.labelcolor": "black",
+              "axes.edgecolor": "black"}
+    plt.rcParams.update(params)
+
+    f, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    # t = f.suptitle('Performance', fontsize=12, color='black')
+    f.subplots_adjust(top=0.85, wspace=0.3)
+
+    epoch_list = list(range(num_epochs))
+    ax1.plot(epoch_list, train_losses, label='Global Loss')
+    ax1.plot(epoch_list, train_kp_losses, label='Keypoint Loss')
+    ax1.set_xticks(np.arange(0, num_epochs, 2))
+    ax1.set_ylabel('Loss')
+    ax1.set_xlabel('Epoch')
+    ax1.set_title('Training Loss', color='w')
+    # l1 = ax1.legend(loc="best")
+
+    ax2.plot(epoch_list, val_aps, label='Average Precision @ IoU = 0.50:0.95')
+    ax2.set_xticks(np.arange(0, num_epochs, 5))
+    ax2.set_ylabel('')
+    ax2.set_ylim([0, 1])
+    ax2.set_xlabel('Epoch')
+    ax2.set_title('Average Precision', color='w')
+    # l2 = ax2.legend(loc="best")
+
+    plt.show()
+
+    if save_fig_name is not None:
+        date_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+        plt.savefig(os.path.sep.join([FIGURE_PATH, f'{save_fig_name}_{date_time}.png']), bbox_inches='tight', pad_inches=0)
+    return f
 
 
 """
@@ -288,12 +368,16 @@ def predict(data_loader, model, device=None, display_preds=True):
         model.eval()
         output = model(images)
 
-    print("Predictions: \n", output[0])
+    # print("Predictions: \n", output[0])
 
     image = (images[0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(np.uint8)
     scores = output[0]['scores'].detach().cpu().numpy()
 
+    print(f'Prediction scores: {scores}')
+
     high_scores_idxs = np.where(scores > 0.3)[0].tolist()  # Indexes of boxes with scores > 0.7
+    if len(high_scores_idxs) == 0:
+        high_scores_idxs = [0]
     post_nms_idxs = torchvision.ops.nms(output[0]['boxes'][high_scores_idxs], output[0]['scores'][high_scores_idxs], 0.3).cpu().numpy()  # Indexes of boxes left after applying NMS (iou_threshold=0.3)
 
     # Below, in output[0]['keypoints'][high_scores_idxs][post_nms_idxs] and output[0]['boxes'][high_scores_idxs][post_nms_idxs]
@@ -314,6 +398,18 @@ def predict(data_loader, model, device=None, display_preds=True):
 
 
 """
+Save log as text tile in log
+"""
+
+
+def save_log(log, save_name=""):
+    date_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+    file_path = os.path.sep.join([LOG_PATH, f'{save_name}_{date_time}.txt'])
+    with open(file_path, "w") as text_file:
+        text_file.write(log)
+
+
+"""
 Main function
 """
 
@@ -329,10 +425,14 @@ def main():
     # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
     device = torch.device('cpu')
 
-    # model = get_model()
-    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'keypointsrcnn_e10_2022_11_17_133052.pth']))
+    model = get_model()
+    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'keypointsrcnn_e10plus10_2022_11_19_182057.pth']))
+    savename = 'keypointsrcnn_e10plus10'
     model.to(device)
-    # train_model(data_loader_train, data_loader_test, model, num_epochs=10, save='keypointsrcnn_e10')
+    # metrics, log = train_model(data_loader_train, data_loader_test, model, num_epochs=10, save=savename)
+    # plot_metrics(metrics, save_fig_name=savename)
+    # save_log(log, save_name=savename)
+
     # evaluate(model, data_loader_test, device)
 
     predict(data_loader_test, model, device)
