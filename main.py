@@ -18,6 +18,7 @@ import torchvision
 from torchvision.models import ResNet50_Weights
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.transforms import functional as F
+from torchvision.utils import make_grid, save_image
 
 import albumentations as A
 
@@ -44,10 +45,10 @@ NUM_KEYPOINTS = 8
 def train_transform():
     return A.Compose([
         A.Sequential([
-            # A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=45, p=0.8),
+            A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.2, rotate_limit=30, p=0.8),
             A.HorizontalFlip(p=0.5),
-            A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, brightness_by_max=True, always_apply=False, p=1),
-            #  A.Blur(blur_limit=3, p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, brightness_by_max=True, always_apply=False, p=0.5),
+             A.Blur(blur_limit=3, p=0.2),
         ], p=1)],
         keypoint_params=A.KeypointParams(format='xy'),
         bbox_params=A.BboxParams(format='pascal_voc', label_fields=['bboxes_labels'])
@@ -99,13 +100,21 @@ class DistalRadiusDataset(Dataset):
             # Then we need to convert it to the following list:
             # [obj1_kp1, obj1_kp2, obj2_kp1, obj2_kp2, obj3_kp1, obj3_kp2]
             keypoints_original_flattened = [el[0:2] for kp in keypoints_original for el in kp]
-            # Apply augmentations
-            transformed = self.transform(image=img_original,
+            img = None
+            bboxes = None
+            while True:  # if bbox extends past dimensions of image or a keypoint is lost (len of keypoints < 8), redo transform
+                transformed = self.transform(image=img_original,  # Apply augmentations
                                          bboxes=bboxes_original,
                                          bboxes_labels=bboxes_labels_original,
                                          keypoints=keypoints_original_flattened)
-            img = transformed['image']
-            bboxes = transformed['bboxes']
+                img = transformed['image']
+                bboxes = transformed['bboxes']
+                if len(bboxes) == 0:
+                    break
+                else:
+                    new_bbox = bboxes[0]
+                    if new_bbox[0] >= 0 and new_bbox[1] >= 0 and new_bbox[2] <= img.shape[1] and new_bbox[3] <= img.shape[0] and len(transformed['keypoints']) == 8:
+                        break
 
             # Unflattening list transformed['keypoints']
             # For example, if we have the following list of keypoints for
@@ -171,7 +180,7 @@ Visualize method adapted from https://medium.com/@alexppppp/how-to-train-a-custo
 """
 
 
-def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=None, keypoints_original=None):
+def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=None, keypoints_original=None, display=True):
     fontsize = 18
 
     for bbox in bboxes:
@@ -199,15 +208,17 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
                 image_original = cv2.circle(image_original, tuple(kp), 0, (255, 0, 0), 5)
                 image_original = cv2.putText(image_original, " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 0, cv2.LINE_AA)
 
-        f, ax = plt.subplots(1, 2, figsize=(10, 5))
 
-        ax[0].imshow(image_original)
-        ax[0].set_title('Ground Truth', fontsize=fontsize)
+        if display:
+            f, ax = plt.subplots(1, 2, figsize=(10, 5))
+            ax[0].imshow(image_original)
+            ax[0].set_title('Ground Truth', fontsize=fontsize)
 
-        ax[1].imshow(image)
-        ax[1].set_title('Prediction', fontsize=fontsize)
-        plt.show()
-
+            ax[1].imshow(image)
+            ax[1].set_title('Prediction', fontsize=fontsize)
+            plt.show()
+        else:
+            return image_original, image
 
 """
 Permute image to displayable format and extrace bboxes and keypoints from output
@@ -254,8 +265,8 @@ def train_model(data_loader_train, data_loader_test, model=None, num_epochs=5, s
     model.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
-    # optimizer = torch.optim.Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-08)
+    # optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
+    optimizer = torch.optim.Adam(params, lr=0.00001, betas=(0.9, 0.999), eps=1e-08)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.3)
 
     train_losses = []
@@ -349,11 +360,107 @@ def plot_metrics(train_metrics, save_fig_name=None):
 
 
 """
+Helper method to pad images with black to standardize size
+"""
+
+
+def pad_black(image, height, width):
+    original_height = image.shape[0]
+    original_width = image.shape[1]
+    new_image = np.zeros((height, width, 3), dtype=int)
+    
+    delta_height = height - original_height
+    delta_width = width - original_width
+
+    if delta_height < 0 or delta_width < 0:  # this function can only pad, not shrink
+        raise ValueError("Desired width and height must be equal or greater to original image value")
+    
+    new_image[delta_height // 2:delta_height // 2 + original_height, delta_width // 2 :delta_width // 2 + original_width] = image
+
+    return new_image
+
+
+"""
 Run predict and display results
 """
 
 
-def predict(data_loader, model, device=None, display_preds=True):
+def predict(data_loader, model, device=None, display_preds=True, num_preds = 1):
+    if device is None:
+        # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+        device = torch.device('cpu')
+    model.to(device)
+
+    iterator = iter(data_loader)
+    
+    images_to_display = []
+    
+    if num_preds == 0 or num_preds > len(data_loader):
+        num_preds = len(data_loader)
+
+    max_h = 0
+    max_w = 0
+    for i in range(0, num_preds):
+        images, targets = next(iterator)
+        images = list(image.to(device) for image in images)
+
+        with torch.no_grad():
+            model.to(device)
+            model.eval()
+            output = model(images)
+        image = (images[0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(np.uint8)
+        scores = output[0]['scores'].detach().cpu().numpy()
+
+        # get largest width and height for later standardization
+        max_h = max(max_h, image.shape[0])
+        max_w = max(max_w, image.shape[1])
+
+        print(f'Prediction scores: {scores}')
+
+        high_scores_idxs = np.where(scores > 0.3)[0].tolist()  # Indexes of boxes with scores > 0.7
+        # if len(high_scores_idxs) == 0:
+        high_scores_idxs = [0]
+        post_nms_idxs = torchvision.ops.nms(output[0]['boxes'][high_scores_idxs], output[0]['scores'][high_scores_idxs], 0.3).cpu().numpy()  # Indexes of boxes left after applying NMS (iou_threshold=0.3)
+
+        # Below, in output[0]['keypoints'][high_scores_idxs][post_nms_idxs] and output[0]['boxes'][high_scores_idxs][post_nms_idxs]
+        # Firstly, we choose only those objects, which have score above predefined threshold. This is done with choosing elements with [high_scores_idxs] indexes
+        # Secondly, we choose only those objects, which are left after NMS is applied. This is done with choosing elements with [post_nms_idxs] indexes
+
+        keypoints = []
+        for kps in output[0]['keypoints'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
+            keypoints.append([list(map(int, kp[:2])) for kp in kps])
+
+        bboxes = []
+        for bbox in output[0]['boxes'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
+            bboxes.append(list(map(int, bbox.tolist())))
+
+        
+        img, original_bboxes, original_keypoints = get_images_bboxes_and_keypoints(images[0], targets[0])
+        img_labeled, pred_img_labeled = visualize(image, bboxes, keypoints, img, original_bboxes, original_keypoints, False)
+        images_to_display.extend([img_labeled, pred_img_labeled])  # add next original and predicted annotated image to list
+
+    for i in range(0, len(images_to_display)): # convert to friendly format for make_grid
+        img = pad_black(images_to_display[i], max_h, max_w)
+        img = np.transpose(img, (2, 0, 1))
+        img = torch.from_numpy(img)
+        images_to_display[i] = img
+    
+    grid = make_grid(images_to_display, nrow=2)
+    grid_img = np.transpose(grid.numpy(), (1, 2, 0))
+    # print(grid_img.shape)
+    plt.rcParams['figure.dpi'] = 300
+    plt.figure(figsize=(2, 2 * len(data_loader)))
+    plt.axis('off')
+    plt.imshow(grid_img)
+    plt.savefig(os.path.sep.join([FIGURE_PATH, "temp.png"]), format="png", bbox_inches='tight', pad_inches=0)
+    plt.show()
+
+"""
+Predict across dataset
+"""
+
+
+def predict_dataset(data_loader, model, device=None, display_preds=True):
     if device is None:
         # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
         device = torch.device('cpu')
@@ -362,39 +469,6 @@ def predict(data_loader, model, device=None, display_preds=True):
     iterator = iter(data_loader)
     images, targets = next(iterator)
     images = list(image.to(device) for image in images)
-
-    with torch.no_grad():
-        model.to(device)
-        model.eval()
-        output = model(images)
-
-    # print("Predictions: \n", output[0])
-
-    image = (images[0].permute(1, 2, 0).detach().cpu().numpy() * 255).astype(np.uint8)
-    scores = output[0]['scores'].detach().cpu().numpy()
-
-    print(f'Prediction scores: {scores}')
-
-    high_scores_idxs = np.where(scores > 0.3)[0].tolist()  # Indexes of boxes with scores > 0.7
-    if len(high_scores_idxs) == 0:
-        high_scores_idxs = [0]
-    post_nms_idxs = torchvision.ops.nms(output[0]['boxes'][high_scores_idxs], output[0]['scores'][high_scores_idxs], 0.3).cpu().numpy()  # Indexes of boxes left after applying NMS (iou_threshold=0.3)
-
-    # Below, in output[0]['keypoints'][high_scores_idxs][post_nms_idxs] and output[0]['boxes'][high_scores_idxs][post_nms_idxs]
-    # Firstly, we choose only those objects, which have score above predefined threshold. This is done with choosing elements with [high_scores_idxs] indexes
-    # Secondly, we choose only those objects, which are left after NMS is applied. This is done with choosing elements with [post_nms_idxs] indexes
-
-    keypoints = []
-    for kps in output[0]['keypoints'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
-        keypoints.append([list(map(int, kp[:2])) for kp in kps])
-
-    bboxes = []
-    for bbox in output[0]['boxes'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
-        bboxes.append(list(map(int, bbox.tolist())))
-
-    if display_preds:
-        img, original_bboxes, original_keypoints = get_images_bboxes_and_keypoints(images[0], targets[0])
-        visualize(image, bboxes, keypoints, img, original_bboxes, original_keypoints)
 
 
 """
@@ -426,16 +500,16 @@ def main():
     device = torch.device('cpu')
 
     model = get_model()
-    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'keypointsrcnn_e10plus10_2022_11_19_182057.pth']))
-    savename = 'keypointsrcnn_e10plus10'
-    model.to(device)
+    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'adam_e10_1e-5_2022_12_04_183751.pth']))
+    # savename = 'adam_e10_1e-5'
+    # model.to(device)
     # metrics, log = train_model(data_loader_train, data_loader_test, model, num_epochs=10, save=savename)
     # plot_metrics(metrics, save_fig_name=savename)
     # save_log(log, save_name=savename)
 
     # evaluate(model, data_loader_test, device)
 
-    predict(data_loader_test, model, device)
+    predict(data_loader_test, model, device, display_preds=True, num_preds=0)
 
     # train_iter = iter(train_dataset)
     # img, target, img_original, target_original = next(train_iter)
