@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import io
 from contextlib import redirect_stdout
 from datetime import datetime
+from statistics import mean
+from PIL import ImageFont, ImageDraw, Image
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -21,6 +23,8 @@ from torchvision.transforms import functional as F
 from torchvision.utils import make_grid, save_image
 
 import albumentations as A
+
+from sklearn.linear_model import LinearRegression
 
 from utils import collate_fn
 from engine import train_one_epoch, evaluate
@@ -177,23 +181,91 @@ class DistalRadiusDataset(Dataset):
 
 """
 Visualize method adapted from https://medium.com/@alexppppp/how-to-train-a-custom-keypoint-detection-model-with-pytorch-d9af90e111da
+Mode: 0 = none, 1 = volar tilt, 2 = radial inclination/height
 """
 
 
-def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=None, keypoints_original=None, display=True):
-    fontsize = 18
+def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=None, keypoints_original=None, mode=1, display=True):
+    fontsize = 15
+    img_pil = Image.fromarray(image)
+    draw = ImageDraw.Draw(img_pil)
+    font = ImageFont.truetype("./courier_new.ttf", fontsize)
+    smallfont = ImageFont.truetype("./courier_new.ttf", int(fontsize * 0.5))
 
     for bbox in bboxes:
         start_point = (bbox[0], bbox[1])
         end_point = (bbox[2], bbox[3])
-        image = cv2.rectangle(image.copy(), start_point, end_point, (0, 255, 0), 2)
+        # draw.rectangle([start_point, end_point], fill=None, outline=(0, 255, 0), width=2)
 
     for kps in keypoints:
         for idx, kp in enumerate(kps):
-            image = cv2.circle(image.copy(), tuple(kp), 0, (255, 0, 0), 5)
-            image = cv2.putText(image.copy(), " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 0, cv2.LINE_AA)
+            draw.ellipse((kp[0] - 2, kp[1] - 2, kp[0] + 2, kp[1] + 2), fill=(255, 0, 0))
+            draw.text(tuple(kp), ' ' + keypoints_classes_ids2names[idx], font=smallfont, fill=(255, 0, 0, 1))
+            # image = cv2.circle(image.copy(), tuple(kp), 0, (255, 0, 0), 5)
+            # image = cv2.putText(image.copy(), " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 0, cv2.LINE_AA)
+
+    if mode == 1:  # calculate and draw volar tilt
+        kps = np.array(keypoints[0])  # keypoints is a one-item array; all the data is nested in keypoints[0], now NumPy matrix
+        dorsal_distal_radius = kps[0]  # identify dorsal and volar distal radius
+        volar_distal_radius = kps[1]
+        dorsal_x_values = [[kps[2][0]], [kps[3][0]], [kps[4][0]]] # collect the x and y values for the dorsal and volar shaft kps
+        dorsal_y_values = [kps[2][1], kps[3][1], kps[4][1]]
+        volar_x_values = [[kps[5][0]], [kps[6][0]], [kps[7][0]]]
+        volar_y_values = [kps[5][1], kps[6][1], kps[7][1]]
+
+        # print(kps)
+
+        dorsal_cortex = LinearRegression().fit(dorsal_x_values, dorsal_y_values)
+        volar_cortex = LinearRegression().fit(volar_x_values, volar_y_values)
+
+        kp_x_values = kps[:, 0]
+        kp_y_values = kps[:, 1]
+        kp_x_min = min(kp_x_values)
+        kp_x_max = max(kp_x_values)
+        kp_y_min = min(kp_y_values)
+        kp_y_max = max(kp_y_values)
+        # Calculate cortex line start and end points (y = mx + b, x = (y - b)/x) using the highest and lowest y values
+        dorsal_line_start = (int((kp_y_min - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_min)
+        dorsal_line_end = (int((kp_y_max - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_max)
+        volar_line_start = (int((kp_y_min - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_min)
+        volar_line_end = (int((kp_y_max - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_max)
+        # image = cv2.line(image.copy(), dorsal_line_start, dorsal_line_end, (0, 255, 255), 1)
+        # image = cv2.line(image.copy(), volar_line_start, volar_line_end, (0, 255, 255), 1)
+
+        # Calculate line between the two cortices, to estimate the overall angle of the shaft
+        shaft_line_start = (int(mean([dorsal_line_start[0], volar_line_start[0]])), kp_y_min)
+        shaft_line_end = (int(mean([dorsal_line_end[0], volar_line_end[0]])), kp_y_max)
+        draw.line([shaft_line_start, shaft_line_end], (0, 255, 0, 1), 1)
+
+        m_shaft = (shaft_line_end[1] - shaft_line_start[1]) / (shaft_line_end[0] - shaft_line_start[0])
+        theta_shaft = np.arctan(m_shaft)
+        if dorsal_distal_radius[0] < volar_distal_radius[0] or dorsal_distal_radius[0] == volar_distal_radius[0] and dorsal_distal_radius[1] >= volar_distal_radius[1]:
+            # depending on if dorsal cortex is left or right, adjust +/- 90 degrees, == is a corner case
+            theta_perpendicular_shaft = theta_shaft + np.pi / 2
+        else:
+            theta_perpendicular_shaft = theta_shaft - np.pi / 2
+
+        # Calculate the line between the dorsal/volar distal radius
+        delta_x_distal_radius = kps[0][0] - kps[1][0]
+        m_distal_radius = (kps[1][1] - kps[0][1]) / (kps[1][0] - kps[0][0])
+        b_distal_radius = kps[0][1] / (m_distal_radius * kps[0][0])
+        theta_distal_radius = np.arctan(m_distal_radius)
+
+        volar_tilt = theta_perpendicular_shaft - theta_distal_radius
+        volar_tilt_degrees = volar_tilt * 180 / np.pi
+        
+        draw.line([tuple(dorsal_distal_radius), tuple(volar_distal_radius)], (0, 255, 0, 1), 1)
+
+        draw.text(tuple([kps[0][0] - 20, kps[0][1] - 25]), str(round(volar_tilt_degrees, 1)) + 'º', font=font, fill=(0, 255, 0, 1))
+        image = np.array(img_pil)
+
+        # plt.figure(figsize=(5, 5))
+        # plt.imshow(image)
+        # plt.show()
+        # quit()
 
     if image_original is None and keypoints_original is None:
+        image = np.array(img_pil)
         plt.figure(figsize=(5, 5))
         plt.imshow(image)
         plt.show()
@@ -201,13 +273,12 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
         for bbox in bboxes_original:
             start_point = (bbox[0], bbox[1])
             end_point = (bbox[2], bbox[3])
-            image_original = cv2.rectangle(image_original.copy(), start_point, end_point, (0, 255, 0), 2)
+            draw.rectangle([start_point, end_point], fill=None, outline=(0, 255, 0), width=2)
 
         for kps in keypoints_original:
             for idx, kp in enumerate(kps):
-                image_original = cv2.circle(image_original, tuple(kp), 0, (255, 0, 0), 5)
-                image_original = cv2.putText(image_original, " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 0, cv2.LINE_AA)
-
+                draw.ellipse((kp[0] - 2, kp[1] - 2, kp[0] + 2, kp[1] + 2), fill=(255, 0, 0))
+                draw.text(tuple(kp), ' ' + keypoints_classes_ids2names[idx], font=smallfont, fill=(255, 0, 0, 1))
 
         if display:
             f, ax = plt.subplots(1, 2, figsize=(10, 5))
@@ -216,6 +287,9 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
 
             ax[1].imshow(image)
             ax[1].set_title('Prediction', fontsize=fontsize)
+            image = np.array(img_pil)
+            plt.figure(figsize=(5, 5))
+            plt.imshow(image)
             plt.show()
         else:
             return image_original, image
@@ -351,11 +425,12 @@ def plot_metrics(train_metrics, save_fig_name=None):
     ax2.set_title('Average Precision', color='w')
     # l2 = ax2.legend(loc="best")
 
-    plt.show()
-
     if save_fig_name is not None:
         date_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
         plt.savefig(os.path.sep.join([FIGURE_PATH, f'{save_fig_name}_{date_time}.png']), bbox_inches='tight', pad_inches=0)
+
+    plt.show()  # Note: show after savefig or figure will be deleted
+
     return f
 
 
@@ -385,7 +460,7 @@ Run predict and display results
 """
 
 
-def predict(data_loader, model, device=None, display_preds=True, num_preds = 1):
+def predict(data_loader, model, device=None, display_preds=True, num_preds = 1, savename="temp"):
     if device is None:
         # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
         device = torch.device('cpu')
@@ -436,7 +511,7 @@ def predict(data_loader, model, device=None, display_preds=True, num_preds = 1):
 
         
         img, original_bboxes, original_keypoints = get_images_bboxes_and_keypoints(images[0], targets[0])
-        img_labeled, pred_img_labeled = visualize(image, bboxes, keypoints, img, original_bboxes, original_keypoints, False)
+        img_labeled, pred_img_labeled = visualize(image, bboxes, keypoints, img, original_bboxes, original_keypoints, mode=1, display=False)
         images_to_display.extend([img_labeled, pred_img_labeled])  # add next original and predicted annotated image to list
 
     for i in range(0, len(images_to_display)): # convert to friendly format for make_grid
@@ -452,23 +527,8 @@ def predict(data_loader, model, device=None, display_preds=True, num_preds = 1):
     plt.figure(figsize=(2, 2 * len(data_loader)))
     plt.axis('off')
     plt.imshow(grid_img)
-    plt.savefig(os.path.sep.join([FIGURE_PATH, "temp.png"]), format="png", bbox_inches='tight', pad_inches=0)
+    plt.savefig(os.path.sep.join([FIGURE_PATH, f'{savename}.png']), format="png", bbox_inches='tight', pad_inches=0)
     plt.show()
-
-"""
-Predict across dataset
-"""
-
-
-def predict_dataset(data_loader, model, device=None, display_preds=True):
-    if device is None:
-        # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
-        device = torch.device('cpu')
-    model.to(device)
-
-    iterator = iter(data_loader)
-    images, targets = next(iterator)
-    images = list(image.to(device) for image in images)
 
 
 """
@@ -500,16 +560,16 @@ def main():
     device = torch.device('cpu')
 
     model = get_model()
-    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'adam_e10_1e-5_2022_12_04_183751.pth']))
-    # savename = 'adam_e10_1e-5'
-    # model.to(device)
-    # metrics, log = train_model(data_loader_train, data_loader_test, model, num_epochs=10, save=savename)
+    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'adam_e20_1e-5_2023_01_29_225031.pth']))
+    savename = 'adam_e20_1e-5'
+    model.to(device)
+    # metrics, log = train_model(data_loader_train, data_loader_test, model, num_epochs=20, save=savename)
     # plot_metrics(metrics, save_fig_name=savename)
     # save_log(log, save_name=savename)
 
     # evaluate(model, data_loader_test, device)
 
-    predict(data_loader_test, model, device, display_preds=True, num_preds=0)
+    predict(data_loader_test, model, device, display_preds=True, num_preds=0, savename='adam_e20_1e-5_2023_01_29_225031')
 
     # train_iter = iter(train_dataset)
     # img, target, img_original, target_original = next(train_iter)
