@@ -239,19 +239,30 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
 
         m_shaft = (shaft_line_end[1] - shaft_line_start[1]) / (shaft_line_end[0] - shaft_line_start[0])
         theta_shaft = np.arctan(m_shaft)
-        if dorsal_distal_radius[0] < volar_distal_radius[0] or dorsal_distal_radius[0] == volar_distal_radius[0] and dorsal_distal_radius[1] >= volar_distal_radius[1]:
+
+        # Determine if the dorsal x value is higher (on right) or lower than volar 
+        dorsal_on_right = True
+        if dorsal_distal_radius[0] < volar_distal_radius[0]:
+            dorsal_on_right = False
+        elif dorsal_distal_radius[0] == volar_distal_radius[0] and dorsal_distal_radius[1] >= volar_distal_radius[1]:
+            dorsal_on_right = False
+
+        # if (dorsal_on_right and m_shaft < 0) or (dorsal_on_right == False and m_shaft > 0):
+        if m_shaft >= 0:
             # depending on if dorsal cortex is left or right, adjust +/- 90 degrees, == is a corner case
-            theta_perpendicular_shaft = theta_shaft + np.pi / 2
-        else:
             theta_perpendicular_shaft = theta_shaft - np.pi / 2
+        else:
+            theta_perpendicular_shaft = theta_shaft + np.pi / 2
 
         # Calculate the line between the dorsal/volar distal radius
-        delta_x_distal_radius = kps[0][0] - kps[1][0]
+        # delta_x_distal_radius = kps[0][0] - kps[1][0]
         m_distal_radius = (kps[1][1] - kps[0][1]) / (kps[1][0] - kps[0][0])
-        b_distal_radius = kps[0][1] / (m_distal_radius * kps[0][0])
+        # b_distal_radius = kps[0][1] / (m_distal_radius * kps[0][0])
         theta_distal_radius = np.arctan(m_distal_radius)
 
         volar_tilt = theta_perpendicular_shaft - theta_distal_radius
+        if not dorsal_on_right:
+            volar_tilt = volar_tilt * -1
         volar_tilt_degrees = volar_tilt * 180 / np.pi
         
         draw.line([tuple(dorsal_distal_radius), tuple(volar_distal_radius)], (0, 255, 0, 1), 1)
