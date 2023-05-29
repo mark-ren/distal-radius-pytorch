@@ -213,10 +213,22 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
         volar_x_values = [[kps[5][0]], [kps[6][0]], [kps[7][0]]]
         volar_y_values = [kps[5][1], kps[6][1], kps[7][1]]
 
-        # print(kps)
-
         dorsal_cortex = LinearRegression().fit(dorsal_x_values, dorsal_y_values)
         volar_cortex = LinearRegression().fit(volar_x_values, volar_y_values)
+
+        # calculate gross slope to determine if best fit line is too vertical to fit linear model; if so run lin reg on inverted data
+        if (kps[4][0] - kps[2][0]) == 0 or abs((kps[4][1] - kps[2][1]) / (kps[4][0] - kps[2][0])) > 5:
+            dorsal_x_values_inverse = [kps[2][0], kps[3][0], kps[4][0]]
+            dorsal_y_values_inverse = [[kps[2][1]], [kps[3][1]], [kps[4][1]]]
+            dorsal_cortex_inverse = LinearRegression().fit(dorsal_y_values_inverse, dorsal_x_values_inverse)
+            dorsal_cortex.coef_ = 1 / dorsal_cortex_inverse.coef_
+            dorsal_cortex.intercept_ = -dorsal_cortex_inverse.intercept_ / dorsal_cortex_inverse.coef_
+        if (kps[7][0] - kps[5][0]) or abs((kps[7][1] - kps[5][1]) / (kps[7][0] - kps[5][0])) > 5:
+            volar_x_values_inverse = [kps[5][0], kps[6][0], kps[7][0]]
+            volar_y_values_inverse = [[kps[5][1]], [kps[6][1]], [kps[7][1]]]
+            volar_cortex_inverse = LinearRegression().fit(volar_y_values_inverse, volar_x_values_inverse)
+            volar_cortex.coef_ = 1 / volar_cortex_inverse.coef_
+            volar_cortex.intercept_ = -volar_cortex_inverse.intercept_ / volar_cortex_inverse.coef_
 
         kp_x_values = kps[:, 0]
         kp_y_values = kps[:, 1]
@@ -229,6 +241,8 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
         dorsal_line_end = (int((kp_y_max - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_max)
         volar_line_start = (int((kp_y_min - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_min)
         volar_line_end = (int((kp_y_max - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_max)
+        draw.line([dorsal_line_start, dorsal_line_end], (0, 255, 0, 1), 1)
+        draw.line([volar_line_start, volar_line_end], (0, 255, 0, 1), 1)
         # image = cv2.line(image.copy(), dorsal_line_start, dorsal_line_end, (0, 255, 255), 1)
         # image = cv2.line(image.copy(), volar_line_start, volar_line_end, (0, 255, 255), 1)
 
@@ -471,23 +485,31 @@ Run predict and display results
 """
 
 
-def predict(data_loader, model, device=None, display_preds=True, num_preds = 1, savename="temp"):
+def predict(data_loader, model, device=None, display_preds=True, savename="temp", indices_to_predict=[]):
     if device is None:
         # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
         device = torch.device('cpu')
     model.to(device)
 
     iterator = iter(data_loader)
-    
+
+    # Convert indices_to_predict to list of 0s and 1s of length(data_loader)
+    if type(indices_to_predict) is not list or indices_to_predict == []:
+        indices_to_predict = [1] * len(data_loader)
+    else:
+        temp_indices = [0] * len(data_loader)
+        for n in indices_to_predict:
+            temp_indices[n] = 1
+        indices_to_predict = temp_indices
+
     images_to_display = []
-    
-    if num_preds == 0 or num_preds > len(data_loader):
-        num_preds = len(data_loader)
 
     max_h = 0
     max_w = 0
-    for i in range(0, num_preds):
+    for i in range(0, len(data_loader)):
         images, targets = next(iterator)
+        if indices_to_predict[i] == 0:
+            continue
         images = list(image.to(device) for image in images)
 
         with torch.no_grad():
@@ -535,7 +557,7 @@ def predict(data_loader, model, device=None, display_preds=True, num_preds = 1, 
     grid_img = np.transpose(grid.numpy(), (1, 2, 0))
     # print(grid_img.shape)
     plt.rcParams['figure.dpi'] = 300
-    plt.figure(figsize=(2, 2 * len(data_loader)))
+    plt.figure(figsize=(4, 4 * len(data_loader)))
     plt.axis('off')
     plt.imshow(grid_img)
     plt.savefig(os.path.sep.join([FIGURE_PATH, f'{savename}.png']), format="png", bbox_inches='tight', pad_inches=0)
@@ -580,7 +602,7 @@ def main():
 
     # evaluate(model, data_loader_test, device)
 
-    predict(data_loader_test, model, device, display_preds=True, num_preds=0, savename='adam_e20_1e-5_2023_01_29_225031')
+    predict(data_loader_test, model, device, display_preds=True, savename='test', indices_to_predict=[])
 
     # train_iter = iter(train_dataset)
     # img, target, img_original, target_original = next(train_iter)
