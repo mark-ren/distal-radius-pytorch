@@ -4,8 +4,8 @@ import json
 from pycocotools.coco import COCO
 
 
-RAW_ANNOT_PATH = 'datasets/annotations/distalradius.json'
-PROCESSED_ANNOT_PATH = 'datasets/annotations/distalradius_processed.json'
+RAW_ANNOT_PATH = 'datasets/annotations/distalradius_1_200.json'
+PROCESSED_ANNOT_PATH = 'datasets/annotations/distalradius_processed_1_200.json'
 
 
 def convert_coco_annots(annotations_file=RAW_ANNOT_PATH):
@@ -100,8 +100,8 @@ def main(annotations_file=RAW_ANNOT_PATH):
     # change current working directory to this file's folder
     os.chdir(sys.path[0])
     processed_annots = convert_coco_annots(annotations_file)
-    # with open(PROCESSED_ANNOT_PATH, "w") as outfile:
-    # json.dump(processed_annots, outfile)
+    with open(PROCESSED_ANNOT_PATH, "w") as outfile:
+        json.dump(processed_annots, outfile)
     for a in processed_annots:
         print(a)
 

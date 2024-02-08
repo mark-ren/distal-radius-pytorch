@@ -9,14 +9,14 @@ import numpy as np
 BASE_PATH = 'datasets'
 IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images'])
 ANNOTS_PATH = os.path.sep.join([BASE_PATH, 'annotations'])
-RAW_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius.json'])
+RAW_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_1_200.json'])
 
 TRAIN_PATH = os.path.sep.join([IMAGES_PATH, 'train'])
 TEST_PATH = os.path.sep.join([IMAGES_PATH, 'test'])
 
-PROCESSED_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_processed.json'])
+PROCESSED_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_processed_1_200.json'])
 
-TRAIN_TEST_SPLIT = 0.8
+TRAIN_TEST_SPLIT = 0.85
 
 
 """

@@ -31,11 +31,11 @@ from engine import train_one_epoch, evaluate
 
 BASE_PATH = 'datasets'
 IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images'])
-# IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images', 'smallscale']) uncomment to use n = 5
+# IMAGES_PATH = os.path.sep.join([BASE_PATH, 'images', 'smallscale']) # uncomment to use n = 5
 ANNOTS_PATH = os.path.sep.join([BASE_PATH, 'annotations'])
 TRAIN_PATH = os.path.sep.join([IMAGES_PATH, 'train'])
 TEST_PATH = os.path.sep.join([IMAGES_PATH, 'test'])
-PROCESSED_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_processed.json'])
+PROCESSED_ANNOT_PATH = os.path.sep.join([ANNOTS_PATH, 'distalradius_processed_1_200.json'])
 
 MODEL_PATH = 'models'
 FIGURE_PATH = 'figures'
@@ -179,6 +179,116 @@ class DistalRadiusDataset(Dataset):
         return len(self.imgs_files)
 
 
+def volar_tilt(img_pil, keypoints, fontsize=15):
+    draw = ImageDraw.Draw(img_pil)
+    font = ImageFont.truetype("./courier_new.ttf", fontsize)
+    smallfont = ImageFont.truetype("./courier_new.ttf", int(fontsize * 0.5))
+
+    kps = np.array(keypoints[0])  # keypoints is a one-item array; all the data is nested in keypoints[0], now NumPy matrix
+    dorsal_distal_radius = kps[0]  # identify dorsal and volar distal radius
+    volar_distal_radius = kps[1]
+    dorsal_x_values = [[kps[2][0]], [kps[3][0]], [kps[4][0]]]  # collect the x and y values for the dorsal and volar shaft kps
+    dorsal_y_values = [kps[2][1], kps[3][1], kps[4][1]]
+    volar_x_values = [[kps[5][0]], [kps[6][0]], [kps[7][0]]]
+    volar_y_values = [kps[5][1], kps[6][1], kps[7][1]]
+
+    dorsal_cortex = LinearRegression().fit(dorsal_x_values, dorsal_y_values)
+    volar_cortex = LinearRegression().fit(volar_x_values, volar_y_values)
+
+    # calculate gross slope to determine if best fit line is too vertical to fit linear model; if so run lin reg on inverted data
+    # slope is grossly calculated as delta y / delta x, asking if delta x is 0 avoids a possible divide by zero error
+    if (kps[4][0] - kps[2][0]) == 0 or abs((kps[4][1] - kps[2][1]) / (kps[4][0] - kps[2][0])) > 5:
+        dorsal_x_values_inverse = [kps[2][0], kps[3][0], kps[4][0]]
+        dorsal_y_values_inverse = [[kps[2][1]], [kps[3][1]], [kps[4][1]]]
+        dorsal_cortex_inverse = LinearRegression().fit(dorsal_y_values_inverse, dorsal_x_values_inverse)
+        if dorsal_cortex_inverse.coef_ == 0: # avoid a divide by zero error
+            dorsal_cortex.coef_ = [sys.maxsize] # if the true slope is zero, make it a very large int
+        else:
+            dorsal_cortex.coef_ = 1 / dorsal_cortex_inverse.coef_
+        dorsal_cortex.intercept_ = -dorsal_cortex_inverse.intercept_ / dorsal_cortex_inverse.coef_
+    if (kps[7][0] - kps[5][0]) == 0 or abs((kps[7][1] - kps[5][1]) / (kps[7][0] - kps[5][0])) > 5:
+        volar_x_values_inverse = [kps[5][0], kps[6][0], kps[7][0]]
+        volar_y_values_inverse = [[kps[5][1]], [kps[6][1]], [kps[7][1]]]
+        volar_cortex_inverse = LinearRegression().fit(volar_y_values_inverse, volar_x_values_inverse)
+        if volar_cortex_inverse.coef_ == 0:
+            volar_cortex.coef_ = [sys.maxsize]
+        else:
+            volar_cortex.coef_ = 1 / volar_cortex_inverse.coef_
+        volar_cortex.intercept_ = -volar_cortex_inverse.intercept_ / volar_cortex_inverse.coef_
+
+    kp_x_values = kps[:, 0]
+    kp_y_values = kps[:, 1]
+    kp_x_min = min(kp_x_values)
+    kp_x_max = max(kp_x_values)
+    kp_y_min = min(kp_y_values)
+    kp_y_max = max(kp_y_values)
+    # Calculate cortex line start and end points (y = mx + b, x = (y - b)/x) using the highest and lowest y values
+    if dorsal_cortex.coef_[0] == 0: # if dorsal cortex regression forms a straight line of slope 0
+        dorsal_line_start = (int(dorsal_distal_radius[0]), int(dorsal_y_values[2])) # draw line of zero slope between dorsal distal radius and proximal shaft
+        dorsal_line_end = (int(dorsal_x_values[2][0]), int(dorsal_y_values[2]))
+    elif dorsal_cortex.coef_[0] == sys.maxsize: # if dorsal cortex regression forms a straight vertical line (slope infinity)
+        dorsal_line_start = (int(dorsal_x_values[2][0]), int(dorsal_distal_radius[1])) # draw vertical line between dorsal distal radius and proximal shaft
+        dorsal_line_end = (int(dorsal_x_values[2][0]), int(dorsal_y_values[2]))
+    else:
+        dorsal_line_start = (int((kp_y_min - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_min)
+        dorsal_line_end = (int((kp_y_max - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_max)
+    if volar_cortex.coef_[0] == 0: # same as above for volar cortex
+        volar_line_start = (int(volar_distal_radius[0]), int(volar_y_values[2]))
+        volar_line_end = (int(volar_x_values[2][0]), int(volar_y_values[2]))
+    elif volar_cortex.coef_[0] == sys.maxsize:
+        volar_line_start = (int(volar_x_values[2][0]), int(volar_distal_radius[1]))
+        volar_line_end = (int(volar_x_values[2][0]), int(volar_y_values[2]))
+    else:
+        volar_line_start = (int((kp_y_min - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_min)
+        volar_line_end = (int((kp_y_max - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_max)
+    draw.line([dorsal_line_start, dorsal_line_end], (0, 255, 0, 1), 1)
+    draw.line([volar_line_start, volar_line_end], (0, 255, 0, 1), 1)
+    # image = cv2.line(image.copy(), dorsal_line_start, dorsal_line_end, (0, 255, 255), 1)
+    # image = cv2.line(image.copy(), volar_line_start, volar_line_end, (0, 255, 255), 1)
+
+    # Calculate line between the two cortices, to estimate the overall angle of the shaft
+    shaft_line_start = (int(mean([dorsal_line_start[0], volar_line_start[0]])), kp_y_min)
+    shaft_line_end = (int(mean([dorsal_line_end[0], volar_line_end[0]])), kp_y_max)
+    draw.line([shaft_line_start, shaft_line_end], (0, 255, 0, 1), 1)
+
+    if shaft_line_end[0] == shaft_line_start[0]: # avoid divide by zero error, if so make slope very large int rather than inf
+        m_shaft = sys.maxsize
+    else:
+        m_shaft = (shaft_line_end[1] - shaft_line_start[1]) / (shaft_line_end[0] - shaft_line_start[0])
+    theta_shaft = np.arctan(m_shaft)
+
+    # Determine if the dorsal x value is higher (on right) or lower than volar
+    dorsal_on_right = True
+    if dorsal_distal_radius[0] < volar_distal_radius[0]:
+        dorsal_on_right = False
+    elif dorsal_distal_radius[0] == volar_distal_radius[0] and dorsal_distal_radius[1] >= volar_distal_radius[1]:
+        dorsal_on_right = False
+
+    # if (dorsal_on_right and m_shaft < 0) or (dorsal_on_right == False and m_shaft > 0):
+    if m_shaft >= 0:
+        # depending on if dorsal cortex is left or right, adjust +/- 90 degrees, == is a corner case
+        theta_perpendicular_shaft = theta_shaft - np.pi / 2
+    else:
+        theta_perpendicular_shaft = theta_shaft + np.pi / 2
+
+    # Calculate the line between the dorsal/volar distal radius
+    # delta_x_distal_radius = kps[0][0] - kps[1][0]
+    m_distal_radius = (kps[1][1] - kps[0][1]) / (kps[1][0] - kps[0][0])
+    # b_distal_radius = kps[0][1] / (m_distal_radius * kps[0][0])
+    theta_distal_radius = np.arctan(m_distal_radius)
+
+    volar_tilt = theta_perpendicular_shaft - theta_distal_radius
+    if not dorsal_on_right:
+        volar_tilt = volar_tilt * -1
+    volar_tilt_degrees = volar_tilt * 180 / np.pi
+
+    draw.line([tuple(dorsal_distal_radius), tuple(volar_distal_radius)], (0, 255, 0, 1), 1)
+
+    draw.text(tuple([kps[0][0] - 20, kps[0][1] - 25]), str(round(volar_tilt_degrees, 1)) + 'º', font=font, fill=(0, 255, 0, 1))
+    image = np.array(img_pil)
+    return image
+
+
 """
 Visualize method adapted from https://medium.com/@alexppppp/how-to-train-a-custom-keypoint-detection-model-with-pytorch-d9af90e111da
 Mode: 0 = none, 1 = volar tilt, 2 = radial inclination/height
@@ -205,84 +315,7 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
             # image = cv2.putText(image.copy(), " " + keypoints_classes_ids2names[idx], tuple(kp), cv2.FONT_HERSHEY_SIMPLEX, 0.2, (255, 0, 0), 0, cv2.LINE_AA)
 
     if mode == 1:  # calculate and draw volar tilt
-        kps = np.array(keypoints[0])  # keypoints is a one-item array; all the data is nested in keypoints[0], now NumPy matrix
-        dorsal_distal_radius = kps[0]  # identify dorsal and volar distal radius
-        volar_distal_radius = kps[1]
-        dorsal_x_values = [[kps[2][0]], [kps[3][0]], [kps[4][0]]] # collect the x and y values for the dorsal and volar shaft kps
-        dorsal_y_values = [kps[2][1], kps[3][1], kps[4][1]]
-        volar_x_values = [[kps[5][0]], [kps[6][0]], [kps[7][0]]]
-        volar_y_values = [kps[5][1], kps[6][1], kps[7][1]]
-
-        dorsal_cortex = LinearRegression().fit(dorsal_x_values, dorsal_y_values)
-        volar_cortex = LinearRegression().fit(volar_x_values, volar_y_values)
-
-        # calculate gross slope to determine if best fit line is too vertical to fit linear model; if so run lin reg on inverted data
-        if (kps[4][0] - kps[2][0]) == 0 or abs((kps[4][1] - kps[2][1]) / (kps[4][0] - kps[2][0])) > 5:
-            dorsal_x_values_inverse = [kps[2][0], kps[3][0], kps[4][0]]
-            dorsal_y_values_inverse = [[kps[2][1]], [kps[3][1]], [kps[4][1]]]
-            dorsal_cortex_inverse = LinearRegression().fit(dorsal_y_values_inverse, dorsal_x_values_inverse)
-            dorsal_cortex.coef_ = 1 / dorsal_cortex_inverse.coef_
-            dorsal_cortex.intercept_ = -dorsal_cortex_inverse.intercept_ / dorsal_cortex_inverse.coef_
-        if (kps[7][0] - kps[5][0]) or abs((kps[7][1] - kps[5][1]) / (kps[7][0] - kps[5][0])) > 5:
-            volar_x_values_inverse = [kps[5][0], kps[6][0], kps[7][0]]
-            volar_y_values_inverse = [[kps[5][1]], [kps[6][1]], [kps[7][1]]]
-            volar_cortex_inverse = LinearRegression().fit(volar_y_values_inverse, volar_x_values_inverse)
-            volar_cortex.coef_ = 1 / volar_cortex_inverse.coef_
-            volar_cortex.intercept_ = -volar_cortex_inverse.intercept_ / volar_cortex_inverse.coef_
-
-        kp_x_values = kps[:, 0]
-        kp_y_values = kps[:, 1]
-        kp_x_min = min(kp_x_values)
-        kp_x_max = max(kp_x_values)
-        kp_y_min = min(kp_y_values)
-        kp_y_max = max(kp_y_values)
-        # Calculate cortex line start and end points (y = mx + b, x = (y - b)/x) using the highest and lowest y values
-        dorsal_line_start = (int((kp_y_min - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_min)
-        dorsal_line_end = (int((kp_y_max - dorsal_cortex.intercept_) / dorsal_cortex.coef_[0]), kp_y_max)
-        volar_line_start = (int((kp_y_min - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_min)
-        volar_line_end = (int((kp_y_max - volar_cortex.intercept_) / volar_cortex.coef_[0]), kp_y_max)
-        draw.line([dorsal_line_start, dorsal_line_end], (0, 255, 0, 1), 1)
-        draw.line([volar_line_start, volar_line_end], (0, 255, 0, 1), 1)
-        # image = cv2.line(image.copy(), dorsal_line_start, dorsal_line_end, (0, 255, 255), 1)
-        # image = cv2.line(image.copy(), volar_line_start, volar_line_end, (0, 255, 255), 1)
-
-        # Calculate line between the two cortices, to estimate the overall angle of the shaft
-        shaft_line_start = (int(mean([dorsal_line_start[0], volar_line_start[0]])), kp_y_min)
-        shaft_line_end = (int(mean([dorsal_line_end[0], volar_line_end[0]])), kp_y_max)
-        draw.line([shaft_line_start, shaft_line_end], (0, 255, 0, 1), 1)
-
-        m_shaft = (shaft_line_end[1] - shaft_line_start[1]) / (shaft_line_end[0] - shaft_line_start[0])
-        theta_shaft = np.arctan(m_shaft)
-
-        # Determine if the dorsal x value is higher (on right) or lower than volar 
-        dorsal_on_right = True
-        if dorsal_distal_radius[0] < volar_distal_radius[0]:
-            dorsal_on_right = False
-        elif dorsal_distal_radius[0] == volar_distal_radius[0] and dorsal_distal_radius[1] >= volar_distal_radius[1]:
-            dorsal_on_right = False
-
-        # if (dorsal_on_right and m_shaft < 0) or (dorsal_on_right == False and m_shaft > 0):
-        if m_shaft >= 0:
-            # depending on if dorsal cortex is left or right, adjust +/- 90 degrees, == is a corner case
-            theta_perpendicular_shaft = theta_shaft - np.pi / 2
-        else:
-            theta_perpendicular_shaft = theta_shaft + np.pi / 2
-
-        # Calculate the line between the dorsal/volar distal radius
-        # delta_x_distal_radius = kps[0][0] - kps[1][0]
-        m_distal_radius = (kps[1][1] - kps[0][1]) / (kps[1][0] - kps[0][0])
-        # b_distal_radius = kps[0][1] / (m_distal_radius * kps[0][0])
-        theta_distal_radius = np.arctan(m_distal_radius)
-
-        volar_tilt = theta_perpendicular_shaft - theta_distal_radius
-        if not dorsal_on_right:
-            volar_tilt = volar_tilt * -1
-        volar_tilt_degrees = volar_tilt * 180 / np.pi
-        
-        draw.line([tuple(dorsal_distal_radius), tuple(volar_distal_radius)], (0, 255, 0, 1), 1)
-
-        draw.text(tuple([kps[0][0] - 20, kps[0][1] - 25]), str(round(volar_tilt_degrees, 1)) + 'º', font=font, fill=(0, 255, 0, 1))
-        image = np.array(img_pil)
+        annotated_image = volar_tilt(img_pil, keypoints)
 
         # plt.figure(figsize=(5, 5))
         # plt.imshow(image)
@@ -295,29 +328,31 @@ def visualize(image, bboxes, keypoints, image_original=None, bboxes_original=Non
         plt.imshow(image)
         plt.show()
     else:
-        for bbox in bboxes_original:
-            start_point = (bbox[0], bbox[1])
-            end_point = (bbox[2], bbox[3])
-            draw.rectangle([start_point, end_point], fill=None, outline=(0, 255, 0), width=2)
-
+        # for bbox in bboxes_original:
+        #     start_point = (bbox[0], bbox[1])
+        #     end_point = (bbox[2], bbox[3])
+        #     draw.rectangle([start_point, end_point], fill=None, outline=(0, 255, 0), width=2)
+        img_pil = Image.fromarray(image)
+        draw = ImageDraw.Draw(img_pil)
         for kps in keypoints_original:
             for idx, kp in enumerate(kps):
                 draw.ellipse((kp[0] - 2, kp[1] - 2, kp[0] + 2, kp[1] + 2), fill=(255, 0, 0))
                 draw.text(tuple(kp), ' ' + keypoints_classes_ids2names[idx], font=smallfont, fill=(255, 0, 0, 1))
+        annotated_image_original = volar_tilt(img_pil, keypoints_original)
 
-        if display:
-            f, ax = plt.subplots(1, 2, figsize=(10, 5))
-            ax[0].imshow(image_original)
-            ax[0].set_title('Ground Truth', fontsize=fontsize)
+    if display:
+        f, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].imshow(image_original)
+        ax[0].set_title('Ground Truth', fontsize=fontsize)
 
-            ax[1].imshow(image)
-            ax[1].set_title('Prediction', fontsize=fontsize)
-            image = np.array(img_pil)
-            plt.figure(figsize=(5, 5))
-            plt.imshow(image)
-            plt.show()
-        else:
-            return image_original, image
+        ax[1].imshow(annotated_image)
+        ax[1].set_title('Prediction', fontsize=fontsize)
+        image = np.array(img_pil)
+        plt.figure(figsize=(5, 5))
+        plt.imshow(annotated_image)
+        plt.show()
+    else:
+        return annotated_image_original, annotated_image
 
 """
 Permute image to displayable format and extrace bboxes and keypoints from output
@@ -356,16 +391,18 @@ Train model
 """
 
 
-def train_model(data_loader_train, data_loader_test, model=None, num_epochs=5, save=None, log=""):
+def train_model(data_loader_train, data_loader_test, model=None, device=None, learning_rate=0.00001, num_epochs=5, save=None, log=""):
     if model is None:
         model = get_model()
         # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
-    device = torch.device('cpu')
+    if device is None:
+        # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+        device = torch.device('cpu')
     model.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
     # optimizer = torch.optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
-    optimizer = torch.optim.Adam(params, lr=0.00001, betas=(0.9, 0.999), eps=1e-08)
+    optimizer = torch.optim.Adam(params, lr=learning_rate, betas=(0.9, 0.999), eps=1e-08)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.3)
 
     train_losses = []
@@ -542,12 +579,11 @@ def predict(data_loader, model, device=None, display_preds=True, savename="temp"
         for bbox in output[0]['boxes'][high_scores_idxs][post_nms_idxs].detach().cpu().numpy():
             bboxes.append(list(map(int, bbox.tolist())))
 
-        
         img, original_bboxes, original_keypoints = get_images_bboxes_and_keypoints(images[0], targets[0])
         img_labeled, pred_img_labeled = visualize(image, bboxes, keypoints, img, original_bboxes, original_keypoints, mode=1, display=False)
         images_to_display.extend([img_labeled, pred_img_labeled])  # add next original and predicted annotated image to list
 
-    for i in range(0, len(images_to_display)): # convert to friendly format for make_grid
+    for i in range(0, len(images_to_display)):  # convert to friendly format for make_grid
         img = pad_black(images_to_display[i], max_h, max_w)
         img = np.transpose(img, (2, 0, 1))
         img = torch.from_numpy(img)
@@ -586,23 +622,26 @@ def main():
     os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
     train_dataset = DistalRadiusDataset(root=TRAIN_PATH, transform=train_transform(), demo=False)
     test_dataset = DistalRadiusDataset(root=TEST_PATH, transform=None, demo=False)
-    data_loader_train = DataLoader(train_dataset, batch_size=3, shuffle=True, collate_fn=collate_fn)
+    data_loader_train = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
     data_loader_test = DataLoader(test_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     # device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+    # mps was able to run after some debugging, and with batch size 1 to avoid Command Buffer error, but dramatically slower than cpu
     device = torch.device('cpu')
 
     model = get_model()
-    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'adam_e20_1e-5_2023_01_29_225031.pth']))
-    savename = 'adam_e20_1e-5'
+    # model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'keypointsrcnn_weights.pth']))
+    model = get_model(weights_path=os.path.sep.join([MODEL_PATH, 'keypointsrcnn_n200_adam_1e-4to-5_e10plus10_sigma75_2024_02_07_185129.pth']))
+
+    savename = 'keypointsrcnn_n200_adam_1e-4to-5_e10plus10_sigma75'
     model.to(device)
-    # metrics, log = train_model(data_loader_train, data_loader_test, model, num_epochs=20, save=savename)
+    # metrics, log = train_model(data_loader_train, data_loader_test, model, device, learning_rate=0.00001, num_epochs=10, save=savename)
     # plot_metrics(metrics, save_fig_name=savename)
     # save_log(log, save_name=savename)
 
     # evaluate(model, data_loader_test, device)
 
-    predict(data_loader_test, model, device, display_preds=True, savename='test', indices_to_predict=[])
+    predict(data_loader_test, model, device, display_preds=True, savename='test', indices_to_predict=[0,1,2,3,4,5,6,7,8,9])
 
     # train_iter = iter(train_dataset)
     # img, target, img_original, target_original = next(train_iter)
